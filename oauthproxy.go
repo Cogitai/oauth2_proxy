@@ -370,10 +370,8 @@ func (p *OAuthProxy) ErrorPage(rw http.ResponseWriter, code int, title string, m
 	p.templates.ExecuteTemplate(rw, "error.html", t)
 }
 
-func (p *OAuthProxy) SignInPage(rw http.ResponseWriter, req *http.Request, code int) {
-	p.ClearSessionCookie(rw, req)
-	rw.WriteHeader(code)
-
+// Get a redirect based on the request header or current page
+func (p *OAuthProxy) GetReqRedirect(req *http.Request) string {
 	redirect_url := req.URL.RequestURI()
 	if req.Header.Get("X-Auth-Request-Redirect") != "" {
 		redirect_url = req.Header.Get("X-Auth-Request-Redirect")
@@ -381,6 +379,12 @@ func (p *OAuthProxy) SignInPage(rw http.ResponseWriter, req *http.Request, code 
 	if redirect_url == p.SignInPath {
 		redirect_url = "/"
 	}
+	return redirect_url
+}
+
+func (p *OAuthProxy) SignInPage(rw http.ResponseWriter, req *http.Request, code int) {
+	p.ClearSessionCookie(rw, req)
+	rw.WriteHeader(code)
 
 	t := struct {
 		ProviderName  string
@@ -394,7 +398,7 @@ func (p *OAuthProxy) SignInPage(rw http.ResponseWriter, req *http.Request, code 
 		ProviderName:  p.provider.Data().ProviderName,
 		SignInMessage: p.SignInMessage,
 		CustomLogin:   p.displayCustomLoginForm(),
-		Redirect:      redirect_url,
+		Redirect:      p.GetReqRedirect(req),
 		Version:       VERSION,
 		ProxyPrefix:   p.ProxyPrefix,
 		Footer:        template.HTML(p.Footer),
@@ -419,7 +423,8 @@ func (p *OAuthProxy) ManualSignIn(rw http.ResponseWriter, req *http.Request) (st
 	return "", false
 }
 
-func (p *OAuthProxy) GetRedirect(req *http.Request) (redirect string, err error) {
+// Get the redirect specified in the form
+func (p *OAuthProxy) GetFormRedirect(req *http.Request) (redirect string, err error) {
 	err = req.ParseForm()
 	if err != nil {
 		return
@@ -469,7 +474,7 @@ func (p *OAuthProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	case path == p.SignOutPath:
 		p.SignOut(rw, req)
 	case path == p.OAuthStartPath:
-		p.OAuthStart(rw, req)
+		p.OAuthStartForm(rw, req)
 	case path == p.OAuthCallbackPath:
 		p.OAuthCallback(rw, req)
 	case path == p.AuthOnlyPath:
@@ -480,7 +485,7 @@ func (p *OAuthProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 }
 
 func (p *OAuthProxy) SignIn(rw http.ResponseWriter, req *http.Request) {
-	redirect, err := p.GetRedirect(req)
+	redirect, err := p.GetFormRedirect(req)
 	if err != nil {
 		p.ErrorPage(rw, 500, "Internal Error", err.Error())
 		return
@@ -493,7 +498,7 @@ func (p *OAuthProxy) SignIn(rw http.ResponseWriter, req *http.Request) {
 		http.Redirect(rw, req, redirect, 302)
 	} else {
 		if p.SkipProviderButton {
-			p.OAuthStart(rw, req)
+			p.OAuthStart(rw, req, redirect)
 		} else {
 			p.SignInPage(rw, req, http.StatusOK)
 		}
@@ -505,18 +510,22 @@ func (p *OAuthProxy) SignOut(rw http.ResponseWriter, req *http.Request) {
 	http.Redirect(rw, req, "/", 302)
 }
 
-func (p *OAuthProxy) OAuthStart(rw http.ResponseWriter, req *http.Request) {
+func (p *OAuthProxy) OAuthStartForm(rw http.ResponseWriter, req *http.Request) {
+	redirect, err := p.GetFormRedirect(req)
+	if err != nil {
+		p.ErrorPage(rw, 500, "Internal Error", err.Error())
+		return
+	}
+	p.OAuthStart(rw, req, redirect)
+}
+
+func (p *OAuthProxy) OAuthStart(rw http.ResponseWriter, req *http.Request, redirect string) {
 	nonce, err := cookie.Nonce()
 	if err != nil {
 		p.ErrorPage(rw, 500, "Internal Error", err.Error())
 		return
 	}
 	p.SetCSRFCookie(rw, req, nonce)
-	redirect, err := p.GetRedirect(req)
-	if err != nil {
-		p.ErrorPage(rw, 500, "Internal Error", err.Error())
-		return
-	}
 	redirectURI := p.GetRedirectURI(req.Host)
 	http.Redirect(rw, req, p.provider.GetLoginURL(redirectURI, fmt.Sprintf("%v:%v", nonce, redirect)), 302)
 }
@@ -598,7 +607,7 @@ func (p *OAuthProxy) Proxy(rw http.ResponseWriter, req *http.Request) {
 			"Internal Error", "Internal Error")
 	} else if status == http.StatusForbidden {
 		if p.SkipProviderButton {
-			p.OAuthStart(rw, req)
+			p.OAuthStart(rw, req, p.GetReqRedirect(req))
 		} else {
 			p.SignInPage(rw, req, http.StatusForbidden)
 		}
